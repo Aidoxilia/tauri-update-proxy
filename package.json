@@ -1,0 +1,17 @@
+{
+  "name": "tauri-update-proxy",
+  "version": "1.0.0",
+  "description": "Proxy server to serve Tauri auto-updates from a private GitHub repo",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
