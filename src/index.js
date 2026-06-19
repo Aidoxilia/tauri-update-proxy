@@ -61,50 +61,77 @@ function checkApiKey(req, res, next) {
   next();
 }
 
+// Mapping target+arch Tauri -> motif attendu dans le nom de fichier installeur.
+// Adapte/complète cette table si tu ajoutes d'autres plateformes (mac, linux).
+const ASSET_PATTERNS = {
+  "windows-x86_64": /_x64-setup\.exe$/i,
+  "windows-i686": /_x86-setup\.exe$/i,
+  "windows-aarch64": /_arm64-setup\.exe$/i,
+  "darwin-x86_64": /_x64\.app\.tar\.gz$/i,
+  "darwin-aarch64": /_aarch64\.app\.tar\.gz$/i,
+  "linux-x86_64": /_amd64\.AppImage$/i,
+};
+
 // ---- Route principale consommée par l'updater Tauri ----
-// Tauri v1 format attendu: { version, pub_date, url, signature, notes }
-// On reconstruit ce JSON dynamiquement à partir des assets de la release GitHub,
-// en remplaçant les download_url publics par des liens signés vers NOTRE proxy
-// (qui, lui, est authentifié côté serveur avec le token GitHub).
+// On reconstruit la réponse attendue par tauri-plugin-updater directement à
+// partir des noms d'assets de la release (pas besoin de latest.json).
+// Convention attendue dans les assets : un fichier installeur (ex: ..._x64-setup.exe)
+// + son fichier de signature au même nom + ".sig".
 app.get("/updater/:target/:arch/:currentVersion", checkApiKey, async (req, res) => {
   try {
     const release = await fetchLatestRelease();
     const version = release.tag_name.replace(/^v/, "");
 
-    // On cherche le latest.json généré par tauri-action parmi les assets
-    const latestJsonAsset = release.assets.find((a) => a.name === "latest.json");
-    if (!latestJsonAsset) {
-      return res.status(404).json({ error: "latest.json not found in release" });
+    // Si la version courante du client est déjà à jour, pas de mise à jour
+    if (req.params.currentVersion === version) {
+      return res.status(204).send();
     }
 
-    // On télécharge le contenu de latest.json en s'authentifiant
-    const assetRes = await fetch(latestJsonAsset.url, {
+    const platformKey = `${req.params.target}-${req.params.arch}`;
+    const pattern = ASSET_PATTERNS[platformKey];
+    if (!pattern) {
+      return res
+        .status(404)
+        .json({ error: `Unsupported platform: ${platformKey}` });
+    }
+
+    const installerAsset = release.assets.find((a) => pattern.test(a.name));
+    if (!installerAsset) {
+      return res.status(404).json({
+        error: `No installer asset matching ${platformKey} found in release ${release.tag_name}`,
+        availableAssets: release.assets.map((a) => a.name),
+      });
+    }
+
+    const sigAsset = release.assets.find(
+      (a) => a.name === `${installerAsset.name}.sig`
+    );
+    if (!sigAsset) {
+      return res.status(404).json({
+        error: `Signature file ${installerAsset.name}.sig not found in release`,
+        availableAssets: release.assets.map((a) => a.name),
+      });
+    }
+
+    // Télécharge le contenu (texte) du fichier .sig en s'authentifiant
+    const sigRes = await fetch(sigAsset.url, {
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
         Accept: "application/octet-stream",
       },
     });
-    const manifest = await assetRes.json();
+    const signature = (await sigRes.text()).trim();
 
-    const platformKey = `${req.params.target}-${req.params.arch}`;
-    const platformData = manifest.platforms?.[platformKey];
-
-    if (!platformData) {
-      // Pas de mise à jour pour cette plateforme
-      return res.status(204).send();
-    }
-
-    // Réécrit l'URL de téléchargement pour pointer vers NOTRE proxy
-    // (qui servira le binaire en s'authentifiant auprès de GitHub)
+    // URL de téléchargement réécrite pour pointer vers notre proxy
     const proxiedUrl = `${req.protocol}://${req.get("host")}/download/${
       release.tag_name
-    }/${encodeURIComponent(getAssetNameFromUrl(platformData.url))}?api_key=${API_KEY}`;
+    }/${encodeURIComponent(installerAsset.name)}?api_key=${API_KEY}`;
 
     return res.json({
-      version: manifest.version ?? version,
-      pub_date: manifest.pub_date ?? release.published_at,
+      version,
+      pub_date: release.published_at,
       url: proxiedUrl,
-      signature: platformData.signature,
+      signature,
       notes: release.body || "",
     });
   } catch (err) {
@@ -166,12 +193,6 @@ app.get("/download/:tag/:assetName", checkApiKey, async (req, res) => {
     return res.status(500).json({ error: "Internal error", detail: err.message });
   }
 });
-
-function getAssetNameFromUrl(url) {
-  // platformData.url dans latest.json pointe vers le browser_download_url GitHub
-  // on en extrait juste le nom de fichier final
-  return decodeURIComponent(url.split("/").pop());
-}
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
