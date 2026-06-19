@@ -1,6 +1,8 @@
 import express from "express";
+import semver from "semver";
 
 const app = express();
+app.set("trust proxy", 1);
 
 // ---- Config (via variables d'environnement, voir .env.example) ----
 const {
@@ -82,8 +84,13 @@ app.get("/updater/:target/:arch/:currentVersion", checkApiKey, async (req, res) 
     const release = await fetchLatestRelease();
     const version = release.tag_name.replace(/^v/, "");
 
-    // Si la version courante du client est déjà à jour, pas de mise à jour
-    if (req.params.currentVersion === version) {
+    // Ne propose jamais une release identique ou plus ancienne que le client.
+    const currentVersion = semver.coerce(req.params.currentVersion);
+    const latestVersion = semver.coerce(version);
+    if (!currentVersion || !latestVersion) {
+      return res.status(400).json({ error: "Invalid semantic version" });
+    }
+    if (!semver.gt(latestVersion, currentVersion)) {
       return res.status(204).send();
     }
 
@@ -123,7 +130,9 @@ app.get("/updater/:target/:arch/:currentVersion", checkApiKey, async (req, res) 
     const signature = (await sigRes.text()).trim();
 
     // URL de téléchargement réécrite pour pointer vers notre proxy
-    const proxiedUrl = `${req.protocol}://${req.get("host")}/download/${
+    const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0].trim();
+    const protocol = forwardedProto || req.protocol;
+    const proxiedUrl = `${protocol}://${req.get("host")}/download/${
       release.tag_name
     }/${encodeURIComponent(installerAsset.name)}?api_key=${API_KEY}`;
 
